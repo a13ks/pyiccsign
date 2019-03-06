@@ -1,28 +1,11 @@
 #!/usr/bin/env python
 
-import sys
 import struct
 import hashlib
 import serial
 import binascii
 
 k_serial = None
-
-# connect = [126, 256-96, 0, 4, 0, 1, 16, 0, 0, 0, 0, 0, 0, 256-2, 256-1, 91, 256-17, 1, 0, 0, 0, 126]
-# poweron = [126, 256-96, 0, 4, 0, 1, 16, 0, 0, 0, 0, 0, 0, 256-3, 256-1, 92, 256-17, 2, 0, 0, 0, 126]
-# ser = serial.Serial('/dev/tty.usbserial-AH01SKWE', baudrate=115200)
-# bytes = ser.write(connect)
-# ser.flush()
-# print "Written bytes = " + str(bytes)
-# bytes = ser.read()
-# print "More bytes = ", str(ser.in_waiting)
-# print "Read bytes = " + str(len(bytes))
-# bytes = ser.write(poweron)
-# ser.flush()
-# print "Written bytes = " + str(bytes)
-# bytes = ser.read()
-# print "Read bytes = " + str(len(bytes))
-# exit(0)
 
 restart_flag = False
 sequence = 4096
@@ -60,8 +43,10 @@ class Packet:
         self.data[14:16] = bytearray(struct.pack('<h', checksum))
 
     def set_checksum(self):
-        self.set_checksum_data(Packet.checksum(self.data, 16, self.data_len - 16))
-        self.set_checksum_head(Packet.checksum(self.data, 0, 16))
+        data_csum = Packet.checksum(self.data, 16, self.data_len - 16)
+        self.set_checksum_data(data_csum)
+        head_csum = Packet.checksum(self.data, 0, 16)
+        self.set_checksum_head(head_csum)
 
     def set_sequence(self, seq):
         self.data[4:8] = struct.pack('<i', seq)
@@ -104,6 +89,8 @@ class Packet:
         if not self.is_ack_type():
             data_checksum = (((self.data[13] & 0xFF) << 8) + (self.data[12] & 0xFF))
             sum = Packet.checksum(self.data, 16, self.data_len - 16)
+            if sum < 0:
+                sum = 65536 - 2
             if sum != data_checksum:
                 return False
         return True
@@ -124,6 +111,10 @@ class Packet:
             sum += (buf[i] & 0xFF)
         while (sum >> 16 != 0):
             sum = (sum & 0xFFFF) + (sum >> 16)
+
+        if ~sum < -32768:
+            return 65535 - sum
+
         return ~sum
 
 class APDU:
@@ -188,14 +179,14 @@ class APDU:
         return bytearray([0, 0xca, 0, 0, 0])
 
     def select_file(self, file_tag):
-        head = [0, 0xa4, 0, 0, 2]
+        head = bytearray([0, 0xa4, 0, 0, 2])
         data = struct.pack('<h', file_tag)
-        req_data = bytearray(head + data)
+        req_data = head + data
         return req_data
 
     def read_file(self, file_offset):
         offset = struct.pack('<h', file_offset)
-        head = [0, 0xb0]
+        head = bytearray([0, 0xb0])
         req_data = head + offset
         return req_data
 
@@ -217,12 +208,11 @@ def translated(data):
     return tmp[0:idx]
 
 def restore_translated(data):
-    tmp = bytearray(len(data))
+    # tmp = bytearray(len(data))
+    tmp = [0x0] * len(data)
     idx = 0
-
     xr = iter(xrange(0, len(data)))
     for i in xr:
-        print "iteration " + str(i)
         c = data[i]
         if c == 0x7e:
             continue
@@ -246,10 +236,46 @@ def get_seq():
     sequence += 1
     return sequence
 
+def get_current_seq():
+    global sequence
+    return sequence
+
+def reset_seq():
+    global sequence
+    print "reset sequence"
+    sequence += 1
+    return sequence
+
+def packet_in(pkt):
+    if not pkt.validate_checksum():
+        print "checksum failed"
+        return False
+
+    # if pkt.get_restart_flag():
+    #     reset_seq()
+
+    if not pkt.is_ack_type():
+        seq = pkt.get_sequence()
+        send_ack(seq)
+    return True
+
+def send_no_receive(pkt):
+    global k_serial
+
+    pkt.set_checksum()
+
+    payload = translated(pkt.get_bytes())
+
+    print ">>", binascii.hexlify(payload)
+
+    k_serial.write(payload)
+    k_serial.flush()
+
 def send_and_receive(pkt):
     global k_serial
 
     pkt.set_sequence(get_seq())
+
     pkt.set_checksum()
 
     payload = translated(pkt.get_bytes())
@@ -264,17 +290,27 @@ def send_and_receive(pkt):
 
     print "<<", binascii.hexlify(buf)
 
+    tmp = []
     packets = []
     for i in range(0, len(buf)):
-        if buf[i] == 126:
-            # pkt_buf = restore_translated(arrayStrip(this.recvCache, 0, this.recvCacheIdx))
-            # if pkt_buf:
-            #     pkt = Packet(pkt_buf)
-            #     packets.append(pkt)
-            print ""
-    return buf
+        if buf[i] == '~': # 0x7e
+            if len(tmp) > 1:
+                # found packet
+                tmp.append(ord(buf[i]))
+                pkt_buf = restore_translated(tmp)
+                pkt = Packet.from_buffer(pkt_buf)
+                tmp = []
+                packets.append(pkt)
+                continue
+        tmp.append(ord(buf[i]))
+
+    for pkt in packets:
+        packet_in(pkt)
+
+    return None
 
 def process_apdu(apdu):
+    print ">> process apdu"
     global k_serial
     pkt = Packet()
     pkt.set_command(4)
@@ -282,7 +318,8 @@ def process_apdu(apdu):
     pkt.set_ic_data(apdu)
 
     reply = send_and_receive(pkt)
-    if reply and len(reply) > 4:
+
+    if reply and len(reply.get_ic_data()) > 4:
         print "got reply"
 
 def send_command(command):
@@ -298,47 +335,52 @@ def send_command(command):
     return reply
 
 def connect():
+    print ">> connect"
     return send_command(1)
 
 def power_on_card():
+    print ">> power on card"
     return send_command(2)
 
 def power_off_card():
+    print ">> power off card"
     return send_command(3)
 
 def get_card_info():
+    print ">> get card info"
     apdu = APDU()
     select_file_req = apdu.select_file(1)
     process_apdu(select_file_req)
 
+    read_file_req = apdu.read_file(0)
+    process_apdu(read_file_req)
+
+
 def select_application():
+    print ">> select application"
     apdu = APDU()
     application_select_apdu = apdu.select_application("NEWPOS-CARD")
     process_apdu(application_select_apdu)
+
+def send_ack(seq):
+    print ">> sending ack"
+    pkt = Packet()
+    pkt.set_ack_type()
+    pkt.set_sequence(seq)
+    send_no_receive(pkt)
 
 def main():
     global restart_flag
     global k_serial
     k_serial = serial.Serial('/dev/tty.usbserial-AH01SKWE', baudrate=115200)
 
-    # pkt = Packet()
-    # get_seq()
-    # # pkt.set_restart_flag()
-    # pkt.set_sequence(get_seq())
-    # pkt.set_command(2)
-    # pkt.set_checksum()
-    # data = pkt.get_bytes()
-    # print binascii.hexlify(data)
-    # translated_data = translated(data)
-    # print binascii.hexlify(translated_data)
-    # print binascii.hexlify(restore_translated(translated_data))
-    # return
-
     connect()
 
     power_on_card()
 
-    select_application()
+    # select_application()
+
+    # get_card_info()
 
     power_off_card()
 
