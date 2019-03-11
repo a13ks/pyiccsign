@@ -5,8 +5,6 @@ import hashlib
 import serial
 import binascii
 import time
-import ctypes
-import numpy
 
 k_serial = None
 
@@ -210,6 +208,9 @@ class APDU:
         req_data = head + offset
         return req_data
 
+    def request_contact_card_data(self, length):
+        return bytearray([0, 0xc0, 0, 0, length])
+
 def translated(data):
     idx = 0
     tmp = bytearray(len(data) * 2)
@@ -277,7 +278,8 @@ def packet_in(pkt):
     if not pkt.is_ack_type():
         seq = pkt.get_sequence()
         send_ack(seq)
-    return True
+        return True
+    return False
 
 def send_no_receive(pkt):
     global k_serial
@@ -313,7 +315,7 @@ def send_and_receive(pkt):
     print "<<", binascii.hexlify(buf)
 
     tmp = []
-    # packets = []
+    ret = None
     for i in range(0, len(buf)):
         if buf[i] == '~': # 0x7e
             if len(tmp) > 1:
@@ -323,14 +325,15 @@ def send_and_receive(pkt):
                 pkt = Packet.from_buffer(pkt_buf)
                 tmp = []
                 # packets.append(pkt)
-                packet_in(pkt)
+                if packet_in(pkt):
+                    ret = pkt
                 continue
         tmp.append(ord(buf[i]))
 
-    return None
+    return ret
 
-def process_apdu(apdu):
-    print ">> process apdu"
+def send_apdu(apdu):
+    print ">> send apdu"
     global k_serial
     pkt = Packet()
     pkt.set_command(4)
@@ -338,9 +341,42 @@ def process_apdu(apdu):
     pkt.set_ic_data(apdu)
 
     reply = send_and_receive(pkt)
+    return reply
 
-    if reply and len(reply.get_ic_data()) > 4:
-        print "got reply"
+def process_apdu(apdu):
+    print ">> process apdu"
+    reply = send_apdu(apdu)
+
+    data = None
+    rec_data = reply.get_ic_data()
+    if len(rec_data) > 4:
+        code = bytearray(rec_data[0:4])
+        status = struct.unpack('>i', code)[0]
+
+        if status != 0:
+            print "status 1 = " + str(status)
+            return None
+
+        data = rec_data[4:]
+
+        if len(data) == 2 and data[0] == 0x61:
+            apdu = APDU()
+            req = apdu.request_contact_card_data(data[1])
+            reply = send_apdu(req)
+            rec_data = reply.get_ic_data()
+            if len(rec_data) > 4:
+                code = bytearray(rec_data[0:4])
+                status = struct.unpack('>i', code)[0]
+
+                if status != 0:
+                    print "status 2 = " + str(status)
+                    return None
+
+                data = bytearray(rec_data[4:])
+    
+    return data
+
+
 
 def send_command(command):
     global restart_flag
@@ -373,8 +409,18 @@ def get_card_info():
     process_apdu(select_file_req)
 
     read_file_req = apdu.read_file(0)
-    process_apdu(read_file_req)
+    data = process_apdu(read_file_req)
+    print ">> card info = " + binascii.hexlify(data)
 
+def get_customer_info():
+    print ">> get customer info"
+    apdu = APDU()
+    select_file_req = apdu.select_file(2)
+    process_apdu(select_file_req)
+
+    read_file_req = apdu.read_file(0)
+    data = process_apdu(read_file_req)
+    print ">> customer info = " + binascii.hexlify(data)
 
 def select_application():
     print ">> select application"
@@ -402,7 +448,9 @@ def main():
 
     get_card_info()
 
-    # power_off_card()
+    get_customer_info()
+
+    power_off_card()
 
 if __name__ == "__main__":
     main()
