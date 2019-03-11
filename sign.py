@@ -4,11 +4,17 @@ import struct
 import hashlib
 import serial
 import binascii
+import time
+import ctypes
+import numpy
 
 k_serial = None
 
 restart_flag = False
 sequence = 4096
+
+def rshift16(val, n): 
+    return val>>n if val >= 0 else (val+0x10000)>>n
 
 class Packet:
     def __init__(self):
@@ -32,15 +38,21 @@ class Packet:
         return self.data[0] & 0x80
     
     def set_command(self, command):
-        self.data[16:18] = struct.pack('<h', command)
+        buf = bytearray(struct.pack('<h', command))
+        self.data[16] = buf[0]
+        self.data[17] = buf[1]
         self.data[2] = 4
         self.data_len += 4
 
     def set_checksum_data(self, checksum):
-        self.data[12:14] = bytearray(struct.pack('<h', checksum))
+        buf = bytearray(struct.pack('<h', checksum))
+        self.data[12] = buf[0]
+        self.data[13] = buf[1]
 
     def set_checksum_head(self, checksum):
-        self.data[14:16] = bytearray(struct.pack('<h', checksum))
+        buf = bytearray(struct.pack('<h', checksum))
+        self.data[14] = buf[0]
+        self.data[15] = buf[1]
 
     def set_checksum(self):
         data_csum = Packet.checksum(self.data, 16, self.data_len - 16)
@@ -49,7 +61,11 @@ class Packet:
         self.set_checksum_head(head_csum)
 
     def set_sequence(self, seq):
-        self.data[4:8] = struct.pack('<i', seq)
+        buf = struct.pack('<i', seq)
+        self.data[4] = buf[0]
+        self.data[5] = buf[1]
+        self.data[6] = buf[2]
+        self.data[7] = buf[3]
 
     def set_data(self, data):
         self.data = data
@@ -73,7 +89,9 @@ class Packet:
     
     def set_ic_data_len(self, len):
         len += 4
-        self.data[2:4] = struct.pack('<i', len)
+        buf = struct.pack('<i', len)
+        self.data[2] = buf[0]
+        self.data[3] = buf[1]
 
     def get_sequence(self):
         return ((self.data[7] & 0xFF) << 24) + ((self.data[6] & 0xFF) << 16) + ((self.data[5] & 0xFF) << 8) + (self.data[4] & 0xFF)
@@ -90,7 +108,7 @@ class Packet:
             data_checksum = (((self.data[13] & 0xFF) << 8) + (self.data[12] & 0xFF))
             sum = Packet.checksum(self.data, 16, self.data_len - 16)
             if sum < 0:
-                sum = 65536 - 2
+                sum += 65536
             if sum != data_checksum:
                 return False
         return True
@@ -107,15 +125,17 @@ class Packet:
             sum += (buf[i] & 0xFF) + ((buf[i + 1] & 0xFF) << 8)
             i += 2
             count -= 2
+
         if count > 0:
             sum += (buf[i] & 0xFF)
-        while (sum >> 16 != 0):
-            sum = (sum & 0xFFFF) + (sum >> 16)
 
-        if ~sum < -32768:
-            return 65535 - sum
+        while sum >> 16 != 0:
+            sum = (sum & 0xFFFF) + (rshift16(sum, 16))
 
-        return ~sum
+        new_sum = ~(sum)
+        if new_sum < -32768:
+            new_sum += 65536
+        return new_sum
 
 class APDU:
     SW_ERROR = -1
@@ -180,7 +200,7 @@ class APDU:
 
     def select_file(self, file_tag):
         head = bytearray([0, 0xa4, 0, 0, 2])
-        data = struct.pack('<h', file_tag)
+        data = struct.pack('>h', file_tag)
         req_data = head + data
         return req_data
 
@@ -284,14 +304,16 @@ def send_and_receive(pkt):
 
     k_serial.write(payload)
     k_serial.flush()
-    byte1 = k_serial.read()
-    more_bytes = k_serial.read(k_serial.in_waiting)
-    buf = byte1 + more_bytes
+
+    while k_serial.in_waiting == 0:
+        time.sleep(0.5)
+
+    buf = k_serial.read(k_serial.in_waiting)
 
     print "<<", binascii.hexlify(buf)
 
     tmp = []
-    packets = []
+    # packets = []
     for i in range(0, len(buf)):
         if buf[i] == '~': # 0x7e
             if len(tmp) > 1:
@@ -300,12 +322,10 @@ def send_and_receive(pkt):
                 pkt_buf = restore_translated(tmp)
                 pkt = Packet.from_buffer(pkt_buf)
                 tmp = []
-                packets.append(pkt)
+                # packets.append(pkt)
+                packet_in(pkt)
                 continue
         tmp.append(ord(buf[i]))
-
-    for pkt in packets:
-        packet_in(pkt)
 
     return None
 
@@ -378,13 +398,11 @@ def main():
 
     power_on_card()
 
-    # select_application()
+    select_application()
 
-    # get_card_info()
+    get_card_info()
 
-    power_off_card()
+    # power_off_card()
 
-
-    
 if __name__ == "__main__":
     main()
