@@ -14,6 +14,49 @@ sequence = 4096
 def rshift16(val, n): 
     return val>>n if val >= 0 else (val+0x10000)>>n
 
+class CardInfo:
+    def __init__(self):
+        self.version = None
+        self.sn = None
+        self.type = None
+        self.make_time = None
+
+    @classmethod
+    def from_buffer(cls, buf):
+        card_info = CardInfo()
+
+        card_info.version = buf[0:3]
+        card_info.sn = buf[3:7]
+        card_info.type = buf[7:8]
+        card_info.make_time = buf[8:15]
+
+        return card_info
+
+    def __str__(self):
+        return "[{}, {}, {}, {}]".format(self.version, self.sn, self.type, self.make_time)
+
+class CustomerInfo:
+    def __init__(self):
+        self.cid = None
+        self.name = None
+        self.address = None
+        self.phone = None
+
+    @classmethod
+    def from_buffer(cls, buf):
+        customer_info = CustomerInfo()
+
+        customer_info.cid = buf[0:2].decode('ascii')
+        customer_info.name = buf[2:66].decode('ascii')
+        customer_info.address = buf[66:166].decode('ascii')
+        customer_info.phone = buf[166:196].decode('ascii')
+        # reserve = buf[196:214]
+
+        return customer_info
+
+    def __str__(self):
+        return "[{}, {}, {}, {}]".format(self.cid, self.name, self.address, self.phone)
+
 class Packet:
     def __init__(self):
         self.restart_flag = False
@@ -151,12 +194,12 @@ class APDU:
     CLA_00 = 0
     CLA_80 = -128
 
-    SW_9000 = { -112, 0 }
-    SW_6a82 = { 106, -126 }
-    SW_6986 = { 105, -122 }
-    SW_6b00 = { 107, 0 }
-    SW_6983 = { 105, -125 }
-    SW_6a80 = { 106, -128 }
+    SW_9000 = bytearray([0x90, 0x0 ])
+    SW_6a82 = bytearray([0x6a, 0x82])
+    SW_6986 = bytearray([0x69, 0x86])
+    SW_6b00 = bytearray([0x6b, 0x0 ])
+    SW_6983 = bytearray([0x69, 0x83])
+    SW_6a80 = bytearray([0x6a, 0x80])
 
     def __init__(self):
         self.sw = []
@@ -164,22 +207,23 @@ class APDU:
     def set_sw(self, sw):
         self.sw = sw
 
-    def status_sw(self):
-        if self.sw == None:
+    @classmethod
+    def status_sw(cls, sw):
+        if sw == None:
             return 1
-        elif len(self.sw) != 2:
+        elif len(sw) != 2:
             return -1
-        elif self.sw == APDU.SW_9000:
+        elif sw == APDU.SW_9000:
             return 0
-        elif self.sw == APDU.SW_6a82:
+        elif sw == APDU.SW_6a82:
             return -2
-        elif self.sw == APDU.SW_6986:
+        elif sw == APDU.SW_6986:
             return -2
-        elif self.sw == APDU.SW_6b00:
+        elif sw == APDU.SW_6b00:
             return -3
-        elif self.sw == APDU.SW_6983:
+        elif sw == APDU.SW_6983:
             return 253
-        elif self.sw == APDU.SW_6a80:
+        elif sw == APDU.SW_6a80:
             return 253
         else:
             return -1
@@ -263,15 +307,16 @@ def get_current_seq():
 
 def reset_seq():
     global sequence
-    print "reset sequence"
+    print("reset sequence")
     sequence += 1
     return sequence
 
 def packet_in(pkt):
     if not pkt.validate_checksum():
-        print "checksum failed"
+        print("checksum failed")
         return False
 
+    # TODO
     # if pkt.get_restart_flag():
     #     reset_seq()
 
@@ -288,7 +333,7 @@ def send_no_receive(pkt):
 
     payload = translated(pkt.get_bytes())
 
-    print ">>", binascii.hexlify(payload)
+    print(">> " + binascii.hexlify(payload))
 
     k_serial.write(payload)
     k_serial.flush()
@@ -302,7 +347,7 @@ def send_and_receive(pkt):
 
     payload = translated(pkt.get_bytes())
 
-    print ">>", binascii.hexlify(payload)
+    print(">> " + binascii.hexlify(payload))
 
     k_serial.write(payload)
     k_serial.flush()
@@ -312,7 +357,7 @@ def send_and_receive(pkt):
 
     buf = k_serial.read(k_serial.in_waiting)
 
-    print "<<", binascii.hexlify(buf)
+    print("<< " + binascii.hexlify(buf))
 
     tmp = []
     ret = None
@@ -333,7 +378,7 @@ def send_and_receive(pkt):
     return ret
 
 def send_apdu(apdu):
-    print ">> send apdu"
+    print(">> send apdu")
     global k_serial
     pkt = Packet()
     pkt.set_command(4)
@@ -344,7 +389,7 @@ def send_apdu(apdu):
     return reply
 
 def process_apdu(apdu):
-    print ">> process apdu"
+    print(">> process apdu")
     reply = send_apdu(apdu)
 
     data = None
@@ -354,7 +399,7 @@ def process_apdu(apdu):
         status = struct.unpack('>i', code)[0]
 
         if status != 0:
-            print "status 1 = " + str(status)
+            print("status 1 = " + str(status))
             return None
 
         data = rec_data[4:]
@@ -369,7 +414,7 @@ def process_apdu(apdu):
                 status = struct.unpack('>i', code)[0]
 
                 if status != 0:
-                    print "status 2 = " + str(status)
+                    print("status 2 = " + str(status))
                     return None
 
                 data = bytearray(rec_data[4:])
@@ -391,45 +436,55 @@ def send_command(command):
     return reply
 
 def connect():
-    print ">> connect"
+    print(">> connect")
     return send_command(1)
 
 def power_on_card():
-    print ">> power on card"
+    print(">> power on card")
     return send_command(2)
 
 def power_off_card():
-    print ">> power off card"
+    print(">> power off card")
     return send_command(3)
 
 def get_card_info():
-    print ">> get card info"
+    print(">> get card info")
     apdu = APDU()
     select_file_req = apdu.select_file(1)
     process_apdu(select_file_req)
 
     read_file_req = apdu.read_file(0)
     data = process_apdu(read_file_req)
-    print ">> card info = " + binascii.hexlify(data)
+    # print ">> card info = " + binascii.hexlify(data)
+    if APDU.status_sw(data[-2:]) == 0:
+        card_info = CardInfo.from_buffer(data)
+        return card_info
+    else:
+        return None
 
 def get_customer_info():
-    print ">> get customer info"
+    print(">> get customer info")
     apdu = APDU()
     select_file_req = apdu.select_file(2)
     process_apdu(select_file_req)
 
     read_file_req = apdu.read_file(0)
     data = process_apdu(read_file_req)
-    print ">> customer info = " + binascii.hexlify(data)
+    # print ">> customer info = " + binascii.hexlify(data)
+    if APDU.status_sw(data[-2:]) == 0:
+        customer_info = CustomerInfo.from_buffer(data)
+        return customer_info
+    else:
+        return None
 
 def select_application():
-    print ">> select application"
+    print(">> select application")
     apdu = APDU()
     application_select_apdu = apdu.select_application("NEWPOS-CARD")
     process_apdu(application_select_apdu)
 
 def send_ack(seq):
-    print ">> sending ack"
+    print(">> sending ack")
     pkt = Packet()
     pkt.set_ack_type()
     pkt.set_sequence(seq)
@@ -446,9 +501,13 @@ def main():
 
     select_application()
 
-    get_card_info()
+    card_info = get_card_info()
 
-    get_customer_info()
+    print(card_info)
+
+    customer_info = get_customer_info()
+
+    print(customer_info)
 
     power_off_card()
 
