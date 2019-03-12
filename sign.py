@@ -14,6 +14,10 @@ sequence = 4096
 def rshift16(val, n): 
     return val>>n if val >= 0 else (val+0x10000)>>n
 
+class FileELF:
+    def __init__(self):
+        None
+
 class CardInfo:
     def __init__(self):
         self.version = None
@@ -490,6 +494,44 @@ def send_ack(seq):
     pkt.set_sequence(seq)
     send_no_receive(pkt)
 
+def sign_file(elf, dir, card_info, customer_info):
+    print(">> sign file")
+    user_nr = 0
+    file_tag = user_nr + 32
+
+    apdu = APDU()
+    select_file_apdu = apdu.select_file(file_tag)
+    reply = process_apdu(select_file_apdu)
+
+    puk_len = 0
+    puk_cert_data = None
+    tmp_data = None
+
+
+    while True:
+        print(">> read puk")
+        read_cert_req = apdu.read_file(0)
+        data = process_apdu(read_cert_req)
+
+        data_len = len(data) - 2
+        if data_len != 0xff:
+            break
+
+        puk_len += data_len
+
+        if tmp_data != None:
+            puk_cert_data = tmp_data
+
+        if puk_cert_data:
+            puk_cert_data = puk_cert_data + data[0:data_len]
+        else:
+            puk_cert_data = data[0:data_len]
+
+        tmp_data = puk_cert_data
+
+    print puk_cert_data
+    None
+
 def main():
     global restart_flag
     global k_serial
@@ -503,11 +545,20 @@ def main():
 
     card_info = get_card_info()
 
-    print(card_info)
-
     customer_info = get_customer_info()
 
     print(customer_info)
+
+    print(card_info)
+
+    elf = FileELF()
+    elf.file_name = 'TransPOS'
+    elf.file_path = '/Users/a13x/dev/newpos/pyiccsign'
+    elf.version = '1.9.2'
+    dir = '/Users/a13x/dev/newpos/pyiccsign/signed'
+
+    if customer_info and card_info:
+        sign_file(elf, dir, card_info, customer_info)
 
     power_off_card()
 
