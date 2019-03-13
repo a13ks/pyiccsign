@@ -6,6 +6,8 @@ import serial
 import binascii
 import time
 
+BUF_SIZE = 65536
+
 k_serial = None
 
 restart_flag = False
@@ -13,6 +15,16 @@ sequence = 4096
 
 def rshift16(val, n): 
     return val>>n if val >= 0 else (val+0x10000)>>n
+
+def read_file(filename):
+    file_bytes = ()
+    with open(filename, 'rb') as f:
+        while True:
+            data = f.read(BUF_SIZE)
+            if not data:
+                break
+            file_bytes = file_bytes + tuple(data)
+    return file_bytes
 
 class FileELF:
     def __init__(self):
@@ -240,6 +252,13 @@ class APDU:
         data = bytearray(app_name, 'ascii')
         select_apdu = head + lc + data
         return select_apdu
+
+    def build_sign_apdu(self, elf, signature):
+        # todo: compose sign apdu
+        return None
+
+    def get_more_sign_apdu(self, seq):
+        return bytearray([0x80, 0xf1, 0, seq])
 
     def build_card_app_ver_ins(self):
         return bytearray([0, 0xca, 0, 0, 0])
@@ -494,6 +513,38 @@ def send_ack(seq):
     pkt.set_sequence(seq)
     send_no_receive(pkt)
 
+def get_needed_signed_file(elf):
+    # todo: check signed file tag
+    sig_0001_tag = [83, 73, 71, 58, 48, 48, 48, 49]
+    sig_0002_tag = [83, 73, 71, 58, 48, 48, 48, 50]
+    return read_file(elf.file_path)
+
+def get_signed_tail_content(customer_info, elf):
+    # todo: add real tail
+    tail = []
+    return tail
+
+def calc_sign_src_hash(file_content, puk_cert_data, signed_tail):
+    m = hashlib.sha256()
+    src = file_content + puk_cert_data + signed_tail
+    m.update(src)
+    return m.digest()
+
+def start_sign_file(elf, dir, puk_cert_data, card_info, customer_info):
+    file_content = get_needed_signed_file(elf)
+    signed_tail = get_signed_tail_content(customer_info, elf)
+
+    hash = calc_sign_src_hash(file_content, puk_cert_data, signed_tail)
+
+    # todo: compose signature
+    signature = bytearray()
+
+    apdu = APDU() 
+    sign_apdu = apdu.build_sign_apdu(elf, signature)
+    data = process_apdu(sign_apdu)
+
+    None
+
 def sign_file(elf, dir, card_info, customer_info):
     print(">> sign file")
     user_nr = 0
@@ -504,32 +555,33 @@ def sign_file(elf, dir, card_info, customer_info):
     reply = process_apdu(select_file_apdu)
 
     puk_len = 0
-    puk_cert_data = None
-    tmp_data = None
-
+    puk_cert_data = bytearray()
 
     while True:
         print(">> read puk")
         read_cert_req = apdu.read_file(0)
         data = process_apdu(read_cert_req)
-
         data_len = len(data) - 2
+        puk_len += data_len
+        puk_cert_data += data[0:data_len]
+
         if data_len != 0xff:
             break
 
-        puk_len += data_len
+    # print(">> puk cert = " + binascii.hexlify(puk_cert_data))
 
-        if tmp_data != None:
-            puk_cert_data = tmp_data
+    ver_bytes = process_apdu(apdu.build_card_app_ver_ins())
 
-        if puk_cert_data:
-            puk_cert_data = puk_cert_data + data[0:data_len]
-        else:
-            puk_cert_data = data[0:data_len]
+    ver = 0
+    if len(ver_bytes) >= 3:
+        # todo
+        print(">> ver bytes = " + binascii.hexlify(ver_bytes)) 
 
-        tmp_data = puk_cert_data
+    if ver >= 30000:
+        None
+    else:
+        start_sign_file(elf, dir, puk_cert_data, card_info, customer_info)
 
-    print puk_cert_data
     None
 
 def main():
@@ -547,14 +599,11 @@ def main():
 
     customer_info = get_customer_info()
 
-    print(customer_info)
-
-    print(card_info)
-
     elf = FileELF()
     elf.file_name = 'TransPOS'
     elf.file_path = '/Users/a13x/dev/newpos/pyiccsign'
     elf.version = '1.9.2'
+    elf.type = 'app'
     dir = '/Users/a13x/dev/newpos/pyiccsign/signed'
 
     if customer_info and card_info:
